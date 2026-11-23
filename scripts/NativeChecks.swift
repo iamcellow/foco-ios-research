@@ -25,7 +25,18 @@ struct NativeChecks {
         var rgba = [UInt8](repeating: 255, count: width * height * 4)
         for y in 0..<height {
             for x in 0..<width {
-                let (r, g, b) = pixel(x: x, y: y, width: width, height: height)
+                var (r, g, b) = pixel(x: x, y: y, width: width, height: height)
+                if textured {
+                    let cx = (Double(x) - 0.51 * Double(width)) / (0.31 * Double(width))
+                    let cy = (Double(y) - 0.61 * Double(height)) / (0.31 * Double(width))
+                    let radius = cx * cx + cy * cy
+                    if radius < 1 {
+                        let light = max(0, 0.7 * sqrt(1 - radius) - 0.45 * cx - 0.5 * cy)
+                        (r, g, b) = (Int(65 + 140 * light), Int(32 + 80 * light), Int(25 + 45 * light))
+                    } else if y < height / 2 {
+                        (r, g, b) = (122 + y * 64 / height, 161 + y * 52 / height, 210)
+                    }
+                }
                 let base = (y * width + x) * 4
                 let grain = textured ? (((x / 3 + y / 3).isMultiple(of: 2)) ? 18 : -18) : 0
                 rgba[base] = UInt8(clamping: r + grain)
@@ -108,7 +119,7 @@ struct NativeChecks {
             }
         }
         samples.sort { $0.0 < $1.0 }
-        let far = samples[samples.count / 10], near = samples[samples.count * 9 / 10]
+        let far = samples[0], near = samples[samples.count - 1]
         print("Selected focus planes:", far.0, near.0)
         guard near.0 - far.0 > 0.2 else { throw FocoError.message("Fixture lacks two distinct depth planes") }
         return (far.1, near.1)
