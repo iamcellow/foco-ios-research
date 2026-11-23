@@ -21,6 +21,7 @@ float4 refine(sample_t rgb,sample_t ab,sample_t prior) {
     return float4(z,z,z,1);
 }
 float4 fuse(sample_t model,sample_t sensor,float slope,float intercept) {
+    if (!isfinite(sensor.r) || sensor.r <= 0) return float4(model.r,model.r,model.r,1);
     float adjusted=sensor.r*slope+intercept;
     float weight=(sensor.r>0 && isfinite(sensor.r)) ? .4*(1-smoothstep(.035,.16,abs(adjusted-model.r))) : 0;
     float z=mix(model.r,clamp(adjusted,0.f,1.f),weight);
@@ -40,6 +41,29 @@ float4 focusDetail(sample_t result,sample_t original,sample_t depth,float focus,
     float a=1-smoothstep(.25,1.2,max(0.f,abs(depth.r-focus)-.032)*strength);
     return float4(mix(result.rgb,original.rgb,a),1);
 }
+// Premultiplied clean-background samples. Reject fractional hair pixels
+// so their foreground colour cannot tint the reconstructed background.
+float4 backSample(sample_t rgb,sample_t mask) {
+    float weight=1-smoothstep(.025f,.42f,mask.r);
+    return float4(rgb.rgb*weight,weight);
+}
+float4 focusSupport(sample_t z,sample_t mask,float focus) {
+    float a=smoothstep(.48f,.88f,mask.r);
+    return float4(a*(1-smoothstep(.05f,.18f,abs(z.r-focus))),0,0,a);
+}
+float4 portraitEdge(sample_t optical,sample_t original,sample_t alpha,sample_t nearBG,
+                    sample_t farBG,sample_t support,sample_t depth,float focus) {
+    float a=clamp(alpha.r,0.f,1.f);
+    float planar=1-smoothstep(.055f,.19f,abs(depth.r-focus));
+    float edge=smoothstep(.01f,.28f,nearBG.a);
+    float connected=support.r/max(.0001f,support.a);
+    float gate=mix(planar,connected,edge*smoothstep(.02f,.30f,support.a));
+    // I = a F + (1-a) B. Replace only the local background contribution.
+    float3 delta=(farBG.rgb-nearBG.rgb)/max(.0001f,nearBG.a);
+    float3 target=max(0.f,original.rgb+(1-a)*delta);
+    float weight=gate*mix(a,smoothstep(.008f,.35f,a),edge);
+    return float4(mix(optical.rgb,target,clamp(weight,0.f,1.f)),1);
+}
 float4 highlights(sample_t s,float exposure) {
     float y=lumin(s.rgb)*exp2(exposure);
     return float4(s.rgb*smoothstep(.36,1.2,y),1);
@@ -56,12 +80,16 @@ float noiseCell(float2 pos,float seed) {
                mix(hash(cell+float2(0,1),seed),hash(cell+1,seed),u.x),u.y)-.5;
 }
 float4 develop(sample_t photo,sample_t halo,sample_t hot,float4 tone,float4 texture,float4 tint,
-               float exposure,float grainScale,float seed,destination dst) {
+               float3 shadowDye,float3 lightDye,float exposure,float grainScale,float seed,destination dst) {
     float3 input=max(photo.rgb,0.f)*exp2(exposure);
     float3 glow=max(halo.rgb-hot.rgb,0.f)*exp2(exposure);
     input+=glow*(texture.y*float3(1,.22,.045)+texture.z);
     float y=max(.000001f,lumin(input));
     float3 col=mix(float3(y),input,tone.y)*tint.rgb;
+    float stop=log2(y/.18f);
+    float3 dyes=mix(float3(1),shadowDye,1-smoothstep(-3.f,.6f,stop));
+    dyes*=mix(float3(1),lightDye,smoothstep(-1.f,1.8f,stop)*(1-.65f*smoothstep(1.8f,3.2f,stop)));
+    col*=dyes;
     float l=max(.000001f,lumin(col));
     float v=.18*pow(l/.18,tone.x);
     v=v/(1+tone.z*v)+tone.w*exp(-8*v);

@@ -5,8 +5,8 @@
 <key>CFBundleName</key><string>Foco</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
-<key>CFBundleShortVersionString</key><string>0.1</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.2</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>NSCameraUsageDescription</key><string>Fotografar em RAW ou JPEG e revelar no próprio iPhone.</string>
 <key>NSPhotoLibraryAddUsageDescription</key><string>Guardar a cópia revelada na sua biblioteca de Fotos.</string>
 <key>UILaunchScreen</key><dict/>

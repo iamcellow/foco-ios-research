@@ -37,7 +37,14 @@ struct Studio: View {
     @State private var metadata = ""
     @State private var dimensions = CGSize.zero
     @State private var edit = Edit()
-    @State private var depthSize: DepthSize = .normal
+    private let depthSize: DepthSize = .maximum
+    @State private var mapVisible = false
+    @State private var depthFrame: CGImage?
+    @State private var holding = false
+    @State private var zoomDetail = false
+    @State private var originalHD: CGImage?
+    @State private var importTask: Task<Void, Never>?
+    @ScaledMetric(relativeTo: .body) private var inspectorHeight: CGFloat = 235
     @State private var comparing = false
     @State private var status = ""
     @State private var error: String?
@@ -67,7 +74,7 @@ struct Studio: View {
                 HStack {
                     Text("Foco").font(.system(.title2, design: .rounded, weight: .bold))
                     Spacer()
-                    Picker("Espaço", selection: $mode) { ForEach(Surface.allCases, id: \.self) { Text($0.rawValue).tag($0) }}.pickerStyle(.segmented).frame(maxWidth: 210)
+                    Picker("Espaço", selection: $mode) { ForEach(Surface.allCases, id: \.self) { Text($0.rawValue).tag($0) }}.pickerStyle(.segmented).frame(maxWidth: 210).disabled(loading)
                     Spacer()
                     Menu {
                         Button { pickGallery = true } label: { Label("Galeria", systemImage: "photo.on.rectangle") }
@@ -75,23 +82,28 @@ struct Studio: View {
                     } label: { Image(systemName: "photo.on.rectangle").frame(width: 44, height: 44) }.accessibilityLabel("Importar foto").disabled(busy || loading)
                 }.padding(.horizontal, 14)
                 if geo.size.width > geo.size.height {
-                    HStack(spacing: 0) { stage; controls.frame(width: min(330, geo.size.width * 0.39)) }
+                    HStack(spacing: 0) { stage; ScrollView { controls }.frame(width: min(340, geo.size.width * 0.39)).background(pad) }
                 } else {
-                    VStack(spacing: 0) { stage; controls.fixedSize(horizontal: false, vertical: true) }
+                    VStack(spacing: 0) {
+                        stage.frame(maxHeight: .infinity)
+                        if mode == .lab, original != nil {
+                            ScrollView { controls }.frame(height: min(inspectorHeight, geo.size.height * 0.43)).background(pad)
+                        } else { controls.fixedSize(horizontal: false, vertical: true) }
+                    }
                 }
-            }.background(Color.black).tint(accent)
+            }.background(Color.black).tint(accent).disabled(busy)
         }
         .onAppear {
             if mode == .camera {
                 cam.start()
             }
         }
-        .onDisappear { cam.stop(); renderTask?.cancel() }
+        .onDisappear { cam.stop(); renderTask?.cancel(); importTask?.cancel() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, mode == .camera {
                 cam.start()
             } else if phase != .active {
-                cam.stop()
+                holding = false; cam.stop()
             }
         }
         .onChange(of: mode) {
@@ -127,8 +139,12 @@ struct Studio: View {
                 cam.finished = nil; Task { await open(url, initial: look) }
             }
         }
+        .sensoryFeedback(.selection, trigger: edit.film)
+        .sensoryFeedback(.selection, trigger: edit.focus)
         .onChange(of: edit) { _, _ in refresh() }
-        .onChange(of: depthSize) { _, _ in refresh() }
+        .onChange(of: tool) { _, next in if next != .lens { mapVisible = false } }
+        .onChange(of: mapVisible) { _, _ in comparing = false; refresh() }
+        .onChange(of: zoomDetail) { _, _ in refresh() }
         .alert("Foco", isPresented: Binding(get: { error != nil }, set: {
             if !$0 {
                 error = nil
@@ -153,6 +169,13 @@ struct Studio: View {
         }
     }
 
+    private var showOriginal: Bool { comparing || holding }
+    private var visibleFrame: CGImage? {
+        if showOriginal { return originalHD ?? original }
+        if mapVisible, let depthFrame { return depthFrame }
+        return result ?? original
+    }
+
     private var stage: some View {
         ZStack {
             Color.black
@@ -161,26 +184,29 @@ struct Studio: View {
                 if let message = cam.message {
                     Text(message).multilineTextAlignment(.center).padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                 }
-            } else if let frame = (comparing ? original : result) ?? original {
-                GeometryReader { proxy in
-                    let k = min(proxy.size.width / CGFloat(frame.width), proxy.size.height / CGFloat(frame.height))
-                    let w = CGFloat(frame.width) * k, h = CGFloat(frame.height) * k
-                    ZStack(alignment: .topLeading) {
-                        Image(decorative: frame, scale: 1).resizable().interpolation(.high)
-                        if showFocus, !comparing {
-                            Image(systemName: "viewfinder").font(.title2).foregroundStyle(accent)
-                                .position(x: edit.focus.x * w, y: edit.focus.y * h).allowsHitTesting(false)
-                        }
-                    }.frame(width: w, height: h).contentShape(Rectangle()).onTapGesture { p in
-                        edit.focus = CGPoint(x: max(0, min(1, p.x / w)), y: max(0, min(1, p.y / h))); showFocus = true
-                    }.accessibilityLabel("Foto em edição").accessibilityHint("Toque na imagem para escolher o plano nítido.")
-                        .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            } else if let frame = visibleFrame {
+                PhotoViewport(frame: frame, focus: showFocus && !showOriginal ? edit.focus : nil,
+                              onFocus: { edit.focus = $0; showFocus = true },
+                              onCompare: { holding = $0 }, onDetail: { zoomDetail = $0 })
+                    .id(sourceURL)
+                if showOriginal || (mapVisible && depthFrame != nil) {
+                    VStack {
+                        Text(showOriginal ? "Original" : "Profundidade · perto em branco")
+                            .font(.caption.weight(.medium)).padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(.thinMaterial, in: Capsule()).padding(8)
+                        Spacer()
+                    }.allowsHitTesting(false)
                 }
-            } else {
+            } else if !loading {
                 ContentUnavailableView("Abra uma foto", systemImage: "photo", description: Text("Use a galeria ou fotografe na câmera."))
             }
             if !status.isEmpty {
-                VStack { Spacer(); Text(status).font(.caption).padding(8).background(.thinMaterial, in: Capsule()).padding(8) }.allowsHitTesting(false)
+                VStack { Spacer()
+                    HStack(spacing: 8) {
+                        if loading || busy || status.hasSuffix("…") { ProgressView().controlSize(.small) }
+                        Text(status).font(.caption)
+                    }.padding(.horizontal, 14).padding(.vertical, 9).background(.regularMaterial, in: Capsule()).padding(8)
+                }.allowsHitTesting(false).accessibilityElement(children: .combine)
             }
         }
     }
@@ -204,7 +230,8 @@ struct Studio: View {
                         }
                     }
                     HStack { Text("Abertura"); Slider(value: $edit.aperture, in: 1.2 ... 16, step: 0.1); Text(String(format: "ƒ/%.1f", Double(edit.aperture))).monospacedDigit() }
-                    Picker("Precisão do mapa", selection: $depthSize) { ForEach(DepthSize.allCases) { Text($0.title).tag($0) }}.pickerStyle(.menu)
+                    Toggle(isOn: $mapVisible) { Label("Mapa de profundidade", systemImage: "square.3.layers.3d") }
+                        .frame(minHeight: 44)
                 case .film:
                     chips(Film.allCases.map(\.rawValue), selection: edit.film.rawValue) {
                         if let value = Film(rawValue: $0) {
@@ -217,7 +244,7 @@ struct Studio: View {
                     Button("Restaurar edição") { edit = Edit(); comparing = false; showFocus = false }
                 }
             }
-        }.font(.subheadline).padding(.horizontal, 16).padding(.vertical, 8).frame(maxWidth: .infinity).background(pad)
+        }.disabled(loading).font(.subheadline).padding(.horizontal, 16).padding(.vertical, 8).frame(maxWidth: .infinity).background(pad)
     }
 
     private func chips(_ items: [String], selection: String, action: @escaping (String) -> Void) -> some View {
@@ -289,10 +316,26 @@ struct Studio: View {
     }
 
     private func importPhoto(_ item: PhotosPickerItem) {
-        Task {
-            do { guard let file = try await item.loadTransferable(type: Imported.self) else { throw FocoError.message("A biblioteca não forneceu o arquivo.") }
-                guard item == picked else { return }; await open(file.url)
-            } catch { report(error) }
+        importTask?.cancel()
+        renderTask?.cancel()
+        rev = UUID()
+        loading = true
+        mode = .lab
+        status = "Carregando da galeria…"
+        importTask = Task { @MainActor in
+            defer { if picked == item { picked = nil } }
+            do {
+                guard let file = try await item.loadTransferable(type: Imported.self) else {
+                    throw FocoError.message("A biblioteca não forneceu o arquivo.")
+                }
+                try Task.checkCancellation()
+                guard item == picked else { return }
+                await open(file.url)
+            } catch {
+                if !Task.isCancelled, item == picked {
+                    loading = false; status = ""; report(error)
+                }
+            }
         }
     }
 
@@ -300,7 +343,7 @@ struct Studio: View {
         let token = UUID(); rev = token; renderTask?.cancel(); loading = true; mode = .lab; status = "Abrindo original…"
         do { let (frame, info, dim) = try await lab.open(url)
             guard token == rev else { return }; original = frame; result = nil; dimensions = dim; metadata = info
-            sourceURL = url; edit = initial; comparing = false; showFocus = false; loading = false; refresh()
+            sourceURL = url; originalHD = nil; depthFrame = nil; holding = false; zoomDetail = false; mapVisible = false; edit = initial; comparing = false; showFocus = false; loading = false; refresh()
         } catch {
             if token == rev {
                 loading = false; status = ""; report(error)
@@ -309,13 +352,22 @@ struct Studio: View {
     }
 
     private func refresh() {
-        guard original != nil,!loading else { return }
+        guard original != nil,!loading,!busy else { return }
         renderTask?.cancel()
         let settings = edit, size = depthSize
+        let detail = zoomDetail, map = mapVisible
         renderTask = Task { @MainActor in
-            do { try await Task.sleep(for: .milliseconds(170)); status = "Calculando prévia…"
-                let frame = try await lab.preview(settings, size)
-                try Task.checkCancellation(); result = frame; status = ""
+            do { try await Task.sleep(for: .milliseconds(170)); status = map ? "Preparando mapa…" : detail ? "Revelando detalhe…" : "Revelando prévia…"
+                let edge: CGFloat = detail ? 3072 : 1152
+                if detail, originalHD == nil {
+                    let large = try await lab.originalPreview(edge: edge)
+                    try Task.checkCancellation()
+                    originalHD = large
+                }
+                let frame = try await lab.preview(settings, size, edge: edge, mapOnly: map)
+                try Task.checkCancellation()
+                if map { depthFrame = frame } else { result = frame }
+                status = ""
             } catch is CancellationError {} catch {
                 if !Task.isCancelled {
                     status = ""; report(error)
