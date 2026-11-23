@@ -1,5 +1,7 @@
 import CoreGraphics
 import CoreImage
+import CoreML
+import Metal
 import Foundation
 import ImageIO
 
@@ -75,13 +77,37 @@ struct NativeChecks {
     }
 
     static func main() throws {
+        setbuf(stdout, nil)
         let context = CIContext(options: [.useSoftwareRenderer: true, .cacheIntermediates: false])
         for (width,height) in [(3024,4032),(1023,769)] {
             try autoreleasepool { try verifyJPEG(image(width: width, height: height), context: context) }
         }
         let scene = try image(width: 511, height: 683)
         let engine = DepthBase()
-        let map = try engine.estimate(scene, size: .normal, context: context)
+        print("Metal device:", MTLCreateSystemDefaultDevice()?.name ?? "none")
+        let map: DepthBase.Map
+        do {
+            map = try engine.estimate(scene, size: .normal, context: context)
+        } catch {
+            print("Production inference:", error.localizedDescription)
+            guard let resource = Bundle.main.url(forResource: "DepthBase", withExtension: "mlmodelc")
+            else { throw error }
+            for unit in [MLComputeUnits.cpuOnly, .cpuAndGPU, .all] {
+                for function in [nil, "res_854x480"] as [String?] {
+                    let config = MLModelConfiguration()
+                    config.computeUnits = unit
+                    config.functionName = function
+                    do {
+                        let probe = try MLModel(contentsOf: resource, configuration: config)
+                        print("Loaded", unit.rawValue, function ?? "default", probe.modelDescription.inputDescriptionsByName["frame"]?.multiArrayConstraint?.shape ?? [])
+                    } catch {
+                        let reason = error as NSError
+                        print("Load probe", unit.rawValue, function ?? "default", reason.domain, reason.code, reason.localizedDescription)
+                    }
+                }
+            }
+            throw error
+        }
         guard map.image.extent == scene.extent, map.low.isFinite, map.high.isFinite, map.high > map.low
         else { throw FocoError.message("Invalid dimensions or disparity range from Core ML") }
         print("Core ML Base 854x480: prediction succeeded, registered to 511x683, range \(map.low)...\(map.high)")
