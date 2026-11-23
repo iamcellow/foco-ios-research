@@ -14,14 +14,14 @@ permissions:
 jobs:
   iphone:
     if: github.event.repository.private == false && inputs.task != 'verificar'
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Selecionar Xcode e conferir Metal
+      - name: Conferir Xcode e Metal
         run: |
-          if [ -d /Applications/Xcode_16.4.app ]; then sudo xcode-select -s /Applications/Xcode_16.4.app; fi
           xcodebuild -version
+          if ! xcrun --sdk iphoneos metal --version; then xcodebuild -downloadComponent MetalToolchain; fi
           xcrun --sdk iphoneos metal --version
       - name: Compilar o IPA
         run: bash scripts/build.sh
