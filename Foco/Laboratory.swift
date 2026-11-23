@@ -255,7 +255,7 @@ actor Laboratory {
                 personMask = mask.transformed(by: CGAffineTransform(scaleX: src.image.extent.width / mask.extent.width,
                                                                       y: src.image.extent.height / mask.extent.height))
             }
-        } catch { Logger().info("Contorno de pessoa indisponível: \(error.localizedDescription)") }
+        } catch { Logger().info("Contorno de pessoa indisponÃ­vel: \(error.localizedDescription)") }
         return personMask
     }
 
@@ -342,8 +342,10 @@ actor Laboratory {
     }
 
     func preview(_ edit: Edit, _ size: DepthSize, edge: CGFloat = 1152, mapOnly: Bool = false) throws -> CGImage {
+        try Task.checkCancellation()
         guard let src = photo else { throw FocoError.message("Abra uma foto.") }
         let graph = try render(src, edit, size, edge: edge, mapOnly: mapOnly)
+        try Task.checkCancellation()
         return try raster(graph)
     }
 

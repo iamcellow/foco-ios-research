@@ -139,6 +139,8 @@ struct Studio: View {
                 cam.finished = nil; Task { await open(url, initial: look) }
             }
         }
+        .sensoryFeedback(.selection, trigger: edit.film)
+        .sensoryFeedback(.selection, trigger: edit.focus)
         .onChange(of: edit) { _, _ in refresh() }
         .onChange(of: tool) { _, next in if next != .lens { mapVisible = false } }
         .onChange(of: mapVisible) { _, _ in comparing = false; refresh() }
@@ -189,7 +191,7 @@ struct Studio: View {
                     .id(sourceURL)
                 if showOriginal || (mapVisible && depthFrame != nil) {
                     VStack {
-                        Text(showOriginal ? "Original" : "Profundidade � perto em branco")
+                        Text(showOriginal ? "Original" : "Profundidade · perto em branco")
                             .font(.caption.weight(.medium)).padding(.horizontal, 12).padding(.vertical, 6)
                             .background(.thinMaterial, in: Capsule()).padding(8)
                         Spacer()
@@ -201,7 +203,7 @@ struct Studio: View {
             if !status.isEmpty {
                 VStack { Spacer()
                     HStack(spacing: 8) {
-                        if loading || busy || status.hasSuffix("�") { ProgressView().controlSize(.small) }
+                        if loading || busy || status.hasSuffix("…") { ProgressView().controlSize(.small) }
                         Text(status).font(.caption)
                     }.padding(.horizontal, 14).padding(.vertical, 9).background(.regularMaterial, in: Capsule()).padding(8)
                 }.allowsHitTesting(false).accessibilityElement(children: .combine)
@@ -228,7 +230,8 @@ struct Studio: View {
                         }
                     }
                     HStack { Text("Abertura"); Slider(value: $edit.aperture, in: 1.2 ... 16, step: 0.1); Text(String(format: "ƒ/%.1f", Double(edit.aperture))).monospacedDigit() }
-                    Picker("Precisão do mapa", selection: $depthSize) { ForEach(DepthSize.allCases) { Text($0.title).tag($0) }}.pickerStyle(.menu)
+                    Toggle(isOn: $mapVisible) { Label("Mapa de profundidade", systemImage: "square.3.layers.3d") }
+                        .frame(minHeight: 44)
                 case .film:
                     chips(Film.allCases.map(\.rawValue), selection: edit.film.rawValue) {
                         if let value = Film(rawValue: $0) {
@@ -318,12 +321,12 @@ struct Studio: View {
         rev = UUID()
         loading = true
         mode = .lab
-        status = "Carregando da galeria�"
+        status = "Carregando da galeria…"
         importTask = Task { @MainActor in
             defer { if picked == item { picked = nil } }
             do {
                 guard let file = try await item.loadTransferable(type: Imported.self) else {
-                    throw FocoError.message("A biblioteca n�o forneceu o arquivo.")
+                    throw FocoError.message("A biblioteca não forneceu o arquivo.")
                 }
                 try Task.checkCancellation()
                 guard item == picked else { return }
@@ -354,7 +357,7 @@ struct Studio: View {
         let settings = edit, size = depthSize
         let detail = zoomDetail, map = mapVisible
         renderTask = Task { @MainActor in
-            do { try await Task.sleep(for: .milliseconds(170)); status = "Calculando prévia…"
+            do { try await Task.sleep(for: .milliseconds(170)); status = map ? "Preparando mapa…" : detail ? "Revelando detalhe…" : "Revelando prévia…"
                 let edge: CGFloat = detail ? 3072 : 1152
                 if detail, originalHD == nil {
                     let large = try await lab.originalPreview(edge: edge)

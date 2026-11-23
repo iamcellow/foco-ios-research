@@ -19,7 +19,7 @@ enum DepthSize: String, CaseIterable, Identifiable {
     }
 
     var title: String {
-        switch self { case .compact: return "Econômico"; case .normal: return "Normal"; case .fine: return "Detalhado"; case .maximum: return "M�ximo" }
+        switch self { case .compact: return "Econômico"; case .normal: return "Normal"; case .fine: return "Detalhado"; case .maximum: return "Máximo" }
     }
 }
 
