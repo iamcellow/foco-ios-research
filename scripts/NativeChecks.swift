@@ -21,15 +21,16 @@ struct NativeChecks {
         return (24 + x * 160 / width + line, 16 + y * 170 / height + line, 32 + line)
     }
 
-    static func image(width: Int, height: Int) throws -> CIImage {
+    static func image(width: Int, height: Int, textured: Bool = false) throws -> CIImage {
         var rgba = [UInt8](repeating: 255, count: width * height * 4)
         for y in 0..<height {
             for x in 0..<width {
                 let (r, g, b) = pixel(x: x, y: y, width: width, height: height)
                 let base = (y * width + x) * 4
-                rgba[base] = UInt8(r)
-                rgba[base + 1] = UInt8(g)
-                rgba[base + 2] = UInt8(b)
+                let grain = textured ? (((x / 3 + y / 3).isMultiple(of: 2)) ? 18 : -18) : 0
+                rgba[base] = UInt8(clamping: r + grain)
+                rgba[base + 1] = UInt8(clamping: g + grain)
+                rgba[base + 2] = UInt8(clamping: b + grain)
             }
         }
         guard let provider = CGDataProvider(data: Data(rgba) as CFData),
@@ -92,7 +93,28 @@ struct NativeChecks {
         return rgba
     }
 
-    static func verifyEditor(_ scene: CIImage, context: CIContext) async throws {
+    static func focusTargets(_ map: CIImage, context: CIContext) throws -> (CGPoint, CGPoint) {
+        // Choose distinct predicted planes. A 2D synthetic scene has no known metric depth.
+        let w = 12, h = 16
+        let scaled = map.transformed(by: CGAffineTransform(scaleX: CGFloat(w) / map.extent.width,
+                                                          y: CGFloat(h) / map.extent.height))
+        var samples = [(Float, CGPoint)]()
+        for y in 1..<(h - 1) {
+            for x in 1..<(w - 1) {
+                var value: Float = 0
+                context.render(scaled, toBitmap: &value, rowBytes: 4, bounds: CGRect(x:x, y:y, width:1, height:1), format: .Rf, colorSpace:nil)
+                let point = CGPoint(x: (CGFloat(x) + 0.5) / CGFloat(w), y: 1 - (CGFloat(y) + 0.5) / CGFloat(h))
+                samples.append((value, point))
+            }
+        }
+        samples.sort { $0.0 < $1.0 }
+        let far = samples[samples.count / 10], near = samples[samples.count * 9 / 10]
+        print("Selected focus planes:", far.0, near.0)
+        guard near.0 - far.0 > 0.2 else { throw FocoError.message("Fixture lacks two distinct depth planes") }
+        return (far.1, near.1)
+    }
+
+    static func verifyEditor(_ scene: CIImage, targets: (CGPoint, CGPoint), context: CIContext) async throws {
         let input = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
         defer { try? FileManager.default.removeItem(at: input) }
         try context.writePNGRepresentation(of: scene, to: input, format: .RGBA8, colorSpace: space)
@@ -100,10 +122,10 @@ struct NativeChecks {
         let (_, _, size) = try await lab.open(input)
         var edit = Edit()
         edit.aperture = 1.4
-        edit.focus = CGPoint(x: 0.12, y: 0.15)
+        edit.focus = targets.0
         let first = try await lab.export(edit, .normal)
         defer { try? FileManager.default.removeItem(at: first.url) }
-        edit.focus = CGPoint(x: 0.85, y: 0.85)
+        edit.focus = targets.1
         let other = try await lab.export(edit, .normal)
         defer { try? FileManager.default.removeItem(at: other.url) }
         edit.film = .silver
@@ -134,7 +156,7 @@ struct NativeChecks {
         for (width,height) in [(3024,4032),(1023,769)] {
             try autoreleasepool { try verifyJPEG(image(width: width, height: height), context: context) }
         }
-        let scene = try image(width: 511, height: 683)
+        let scene = try image(width: 511, height: 683, textured: true)
         let engine = DepthBase()
         print("Metal device:", MTLCreateSystemDefaultDevice()?.name ?? "none")
         let map: DepthBase.Map
@@ -163,6 +185,6 @@ struct NativeChecks {
         guard map.image.extent == scene.extent, map.low.isFinite, map.high.isFinite, map.high > map.low
         else { throw FocoError.message("Invalid dimensions or disparity range from Core ML") }
         print("Core ML Base 854x480: prediction succeeded, registered to 511x683, range \(map.low)...\(map.high)")
-        try await verifyEditor(scene, context: context)
+        try await verifyEditor(scene, targets: focusTargets(map.image, context: context), context: context)
     }
 }
