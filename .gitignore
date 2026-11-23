@@ -1,0 +1,14 @@
+Foco/DepthBase.mlpackage/
+Comparacao/
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.p12
+*.mobileprovision
+*.ipa
+*.jpg
+*.jpeg
+*.heic
+*.dng
+__pycache__/
