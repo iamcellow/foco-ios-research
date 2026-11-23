@@ -76,7 +76,59 @@ struct NativeChecks {
         print("JPEG \(width)x\(height): \(samples.count) pixel probes passed, max channel delta \(worst)/255")
     }
 
-    static func main() throws {
+    static func decodedRGB(_ url: URL, size: CGSize) throws -> [UInt8] {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              image.width == Int(size.width), image.height == Int(size.height)
+        else { throw FocoError.message("Invalid exported image or dimensions") }
+        var rgba = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        try rgba.withUnsafeMutableBytes { storage in
+            guard let bitmap = CGContext(data: storage.baseAddress, width: image.width, height: image.height,
+                                         bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                                         space: space, bitmapInfo: layout)
+            else { throw FocoError.message("Could not allocate editor result") }
+            bitmap.draw(image, in: CGRect(origin: .zero, size: size))
+        }
+        return rgba
+    }
+
+    static func verifyEditor(_ scene: CIImage, context: CIContext) async throws {
+        let input = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: input) }
+        try context.writePNGRepresentation(of: scene, to: input, format: .RGBA8, colorSpace: space)
+        let lab = Laboratory()
+        let (_, _, size) = try await lab.open(input)
+        var edit = Edit()
+        edit.aperture = 1.4
+        edit.focus = CGPoint(x: 0.12, y: 0.15)
+        let first = try await lab.export(edit, .normal)
+        defer { try? FileManager.default.removeItem(at: first.url) }
+        edit.focus = CGPoint(x: 0.85, y: 0.85)
+        let other = try await lab.export(edit, .normal)
+        defer { try? FileManager.default.removeItem(at: other.url) }
+        edit.film = .silver
+        _ = try await lab.preview(edit, .normal)
+        let silver = try await lab.export(edit, .normal)
+        defer { try? FileManager.default.removeItem(at: silver.url) }
+        let a = try decodedRGB(first.url, size: size), b = try decodedRGB(other.url, size: size)
+        let mono = try decodedRGB(silver.url, size: size)
+        var different = 0, chromatic = 0, peakMonoChroma = 0
+        var minLuma = 255, maxLuma = 0
+        for i in stride(from: 0, to: a.count, by: 4) {
+            if (0..<3).contains(where: { abs(Int(a[i+$0]) - Int(b[i+$0])) > 5 }) { different += 1 }
+            if abs(Int(a[i]) - Int(a[i+2])) > 16 { chromatic += 1 }
+            let lo = min(mono[i], mono[i+1], mono[i+2]), hi = max(mono[i], mono[i+1], mono[i+2])
+            peakMonoChroma = max(peakMonoChroma, Int(hi) - Int(lo))
+            minLuma = min(minLuma, Int(lo))
+            maxLuma = max(maxLuma, Int(hi))
+        }
+        print("Editor: focus changed", different, "pixels; neutral color pixels", chromatic,
+              "silver channel spread", peakMonoChroma, "silver levels", minLuma, maxLuma)
+        guard different > 20, chromatic > a.count / 40, peakMonoChroma <= 4, maxLuma - minLuma > 80
+        else { throw FocoError.message("Optical or film render failed its pixel checks") }
+    }
+
+    static func main() async throws {
         setbuf(stdout, nil)
         let context = CIContext(options: [.useSoftwareRenderer: true, .cacheIntermediates: false])
         for (width,height) in [(3024,4032),(1023,769)] {
@@ -111,5 +163,6 @@ struct NativeChecks {
         guard map.image.extent == scene.extent, map.low.isFinite, map.high.isFinite, map.high > map.low
         else { throw FocoError.message("Invalid dimensions or disparity range from Core ML") }
         print("Core ML Base 854x480: prediction succeeded, registered to 511x683, range \(map.low)...\(map.high)")
+        try await verifyEditor(scene, context: context)
     }
 }
