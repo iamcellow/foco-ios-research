@@ -2,6 +2,7 @@ import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
+import Vision
 import Metal
 import os
 import UniformTypeIdentifiers
@@ -12,16 +13,28 @@ enum Film: String, CaseIterable, Identifiable {
         self
     }
 
+    /// Artist-authored shadow and highlight dye biases in linear RGB.
+    var split: (CIVector, CIVector) {
+        switch self {
+        case .portrait: return (.init(x: 0.96, y: 1.08, z: 1.01), .init(x: 1.13, y: 1.02, z: 0.89))
+        case .daylight: return (.init(x: 0.89, y: 1.07, z: 1.13), .init(x: 1.10, y: 1.04, z: 0.91))
+        case .cinema: return (.init(x: 0.65, y: 1.16, z: 1.23), .init(x: 1.22, y: 1.02, z: 0.78))
+        case .tungsten: return (.init(x: 0.72, y: 0.92, z: 1.36), .init(x: 1.25, y: 0.98, z: 0.76))
+        case .chrome: return (.init(x: 1.03, y: 0.91, z: 1.17), .init(x: 1.05, y: 0.99, z: 1.02))
+        case .clear, .silver: return (.init(x: 1, y: 1, z: 1), .init(x: 1, y: 1, z: 1))
+        }
+    }
+
     /// contrast, saturation, shoulder, toe / grain, red halo, bloom, grain diameter / RGB gains
     var recipe: ([CGFloat], [CGFloat], [CGFloat]) {
         switch self {
         case .clear: ([1, 1, 0, 0], [0, 0, 0, 1], [1, 1, 1])
-        case .portrait: ([0.96, 0.91, 0.20, 0.006], [0.028, 0.09, 0.024, 1.6], [1.045, 1.012, 0.96])
-        case .daylight: ([1.07, 1.04, 0.17, 0.003], [0.016, 0.055, 0.012, 1.1], [1.022, 1.018, 0.977])
-        case .cinema: ([1.03, 0.92, 0.24, 0.007], [0.043, 0.13, 0.026, 1.9], [1.035, 1, 0.975])
-        case .tungsten: ([1.09, 0.86, 0.30, 0.010], [0.068, 0.34, 0.038, 2.4], [0.945, 1, 1.08])
-        case .chrome: ([1.18, 1.12, 0.13, 0.001], [0.022, 0.045, 0.008, 1.25], [1.014, 1, 0.986])
-        case .silver: ([1.15, 0, 0.20, 0.006], [0.082, 0.09, 0.018, 2.1], [1, 1, 1])
+        case .portrait: ([0.91, 0.83, 0.28, 0.008], [0.028, 0.09, 0.024, 1.6], [1.13, 1.01, 0.88])
+        case .daylight: ([1.16, 1.23, 0.14, 0.002], [0.016, 0.055, 0.012, 1.1], [1.022, 1.018, 0.977])
+        case .cinema: ([1.18, 0.92, 0.34, 0.009], [0.043, 0.13, 0.026, 1.9], [1.035, 1, 0.975])
+        case .tungsten: ([1.13, 0.88, 0.38, 0.008], [0.068, 0.34, 0.038, 2.4], [0.84, 0.97, 1.23])
+        case .chrome: ([1.29, 1.28, 0.22, 0.001], [0.022, 0.045, 0.008, 1.25], [1.014, 1, 0.986])
+        case .silver: ([1.28, 0, 0.20, 0.005], [0.082, 0.09, 0.018, 2.1], [1, 1, 1])
         }
     }
 }
@@ -98,6 +111,8 @@ actor Laboratory {
     private let space = CGColorSpace(name: CGColorSpace.sRGB)!
     private var kernels = [String: CIColorKernel]()
     private var photo: SourcePhoto?
+    private var personMask: CIImage?
+    private var checkedPerson = false
     private var cached: (DepthSize, DepthBase.Map)?
     init() {
         let options: [CIContextOption: Any] = [.cacheIntermediates: false, .workingFormat: CIFormat.RGBAh,
@@ -174,11 +189,16 @@ actor Laboratory {
         let seed = bytes.reduce(UInt32(2_166_136_261)) { ($0 ^ UInt32($1)) &* 16_777_619 }
         photo = SourcePhoto(image: image, disparity: sensor, raw: raw, seed: CGFloat(seed % 32749), originalURL: url, exif: info.joined(separator: " · "), focalPixels: focalPixels)
         cached = nil
+        checkedPerson = false
+        personMask = nil
         return (preview, info.joined(separator: " · "), image.extent.size)
     }
 
     private func display(_ image: CIImage) throws -> CGImage {
-        let scaled = resize(image, edge: 1152)
+        return try raster(resize(image, edge: 1152))
+    }
+
+    private func raster(_ scaled: CIImage) throws -> CGImage {
         guard let result = context.createCGImage(scaled, from: scaled.extent.integral, format: .RGBA8, colorSpace: space) else { throw FocoError.message("Falha na prévia.") }
         return result
     }
@@ -219,19 +239,50 @@ actor Laboratory {
         return map
     }
 
-    private func render(_ src: SourcePhoto, _ edit: Edit, _ size: DepthSize, preview: Bool) throws -> CIImage {
-        let img = preview ? resize(src.image, edge: 1152) : src.image
+    // Vision supplies a soft portrait prior. The depth model still determines
+    // ordering and the focus plane, including when people are at different distances.
+    private func portraitPrior(_ src: SourcePhoto) -> CIImage? {
+        if checkedPerson { return personMask }
+        checkedPerson = true
+        let guide = resize(src.image, edge: 1536)
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .accurate
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        do {
+            try VNImageRequestHandler(ciImage: guide, options: [:]).perform([request])
+            if let buffer = request.results?.first?.pixelBuffer {
+                let mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace: NSNull()])
+                personMask = mask.transformed(by: CGAffineTransform(scaleX: src.image.extent.width / mask.extent.width,
+                                                                      y: src.image.extent.height / mask.extent.height))
+            }
+        } catch { Logger().info("Contorno de pessoa indispon�vel: \(error.localizedDescription)") }
+        return personMask
+    }
+
+    private func guided(_ prior: CIImage, by image: CIImage, radius: CGFloat) throws -> CIImage {
+        let r = image.extent
+        func mean(_ value: CIImage) -> CIImage {
+            value.clampedToExtent().applyingGaussianBlur(sigma: radius).cropped(to: r)
+        }
+        let moments = try kernel("moments", r, [image, prior])
+        let cross = try kernel("crossMoment", r, [image, prior])
+        let coefficients = try kernel("coefficients", r, [mean(moments), mean(cross)])
+        return try kernel("refine", r, [image, mean(coefficients), prior])
+    }
+
+    private func render(_ src: SourcePhoto, _ edit: Edit, _ size: DepthSize, edge: CGFloat?, mapOnly: Bool = false) throws -> CIImage {
+        let img = edge.map { resize(src.image, edge: $0) } ?? src.image
         let r = img.extent
         let ratio = r.width / src.image.extent.width
         let map = try depth(src, size)
-        let prior = map.image.transformed(by: CGAffineTransform(scaleX: ratio, y: ratio))
+        let transform = CGAffineTransform(scaleX: ratio, y: ratio)
+        let prior = map.image.transformed(by: transform)
         func blurred(_ value: CIImage, _ radius: CGFloat) -> CIImage {
             value.clampedToExtent().applyingGaussianBlur(sigma: radius).cropped(to: r)
         }
-        let radius = max(1.2, max(r.width, r.height) / 540)
-        let moments = try kernel("moments", r, [img, prior]), cross = try kernel("crossMoment", r, [img, prior])
-        let ab = try kernel("coefficients", r, [blurred(moments, radius), blurred(cross, radius)])
-        let z = try kernel("refine", r, [img, blurred(ab, radius), prior])
+        let radius = max(1.4, max(r.width, r.height) / 380)
+        let z = try guided(prior, by: img, radius: radius)
+        if mapOnly { return z }
         let pos = CGPoint(x: min(r.maxX - 1, max(0, edit.focus.x * r.width)), y: min(r.maxY - 1, max(0, (1 - edit.focus.y) * r.height)))
         var focus: Float = 0
         context.render(z, toBitmap: &focus, rowBytes: 4, bounds: CGRect(x: floor(pos.x), y: floor(pos.y), width: 1, height: 1), format: .Rf, colorSpace: nil)
@@ -263,6 +314,20 @@ actor Laboratory {
             comp = try kernel("overPlane", r, [comp, band, z, center, width])
         }
         comp = try kernel("focusDetail", r, [comp, img, z, focus, strength])
+        if let prior = portraitPrior(src) {
+            let alpha = try guided(prior.transformed(by: transform), by: img, radius: radius)
+            var onPerson: Float = 0
+            context.render(alpha, toBitmap: &onPerson, rowBytes: 4,
+                           bounds: CGRect(x: floor(pos.x), y: floor(pos.y), width: 1, height: 1), format: .Rf, colorSpace: nil)
+            if onPerson > 0.6 {
+                let away = try kernel("backSample", r, [img, alpha])
+                let defocused = try kernel("backSample", r, [comp, alpha])
+                let extent = max(2, radius * 1.6)
+                let nearby = blurred(away, extent), backdrop = blurred(defocused, extent)
+                let support = try kernel("focusSupport", r, [z, alpha, focus])
+                comp = try kernel("portraitEdge", r, [comp, img, alpha, nearby, backdrop, blurred(support, extent), z, focus])
+            }
+        }
         if edit.film == .clear, edit.ev == 0 {
             return comp
         }
@@ -273,18 +338,24 @@ actor Laboratory {
         let hot = try kernel("highlights", r, [comp, edit.ev])
         let halo = blurred(hot, max(0.7, max(r.width, r.height) / 350))
         return try kernel("develop", r, [comp, halo, hot, v(t), v([g[0] * edit.texture, g[1] * edit.texture, g[2] * edit.texture, g[3]]),
-                                         v(c + [1]), edit.ev, max(r.width, r.height) / 4032, src.seed])
+                                         v(c + [1]), edit.film.split.0, edit.film.split.1, edit.ev, max(r.width, r.height) / 4032, src.seed])
     }
 
-    func preview(_ edit: Edit, _ size: DepthSize) throws -> CGImage {
+    func preview(_ edit: Edit, _ size: DepthSize, edge: CGFloat = 1152, mapOnly: Bool = false) throws -> CGImage {
         guard let src = photo else { throw FocoError.message("Abra uma foto.") }
-        return try display(render(src, edit, size, preview: true))
+        let graph = try render(src, edit, size, edge: edge, mapOnly: mapOnly)
+        return try raster(graph)
+    }
+
+    func originalPreview(edge: CGFloat) throws -> CGImage {
+        guard let src = photo else { throw FocoError.message("Abra uma foto.") }
+        return try raster(resize(src.image, edge: edge))
     }
 
     func export(_ edit: Edit, _ size: DepthSize) throws -> Exported {
         guard let src = photo else { throw FocoError.message("Abra uma foto.") }
         let started = ProcessInfo.processInfo.systemUptime
-        let graph = try render(src, edit, size, preview: false)
+        let graph = try render(src, edit, size, edge: nil)
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("Foco-" + UUID().uuidString + ".jpg")
         try writeOriginalJPEG(graph, context: context, colorSpace: space, to: url)
         return Exported(url: url, dimensions: graph.extent.size, seconds: ProcessInfo.processInfo.systemUptime - started)

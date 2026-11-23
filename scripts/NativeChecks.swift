@@ -93,6 +93,11 @@ struct NativeChecks {
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
               image.width == Int(size.width), image.height == Int(size.height)
         else { throw FocoError.message("Invalid exported image or dimensions") }
+        return try pixels(image)
+    }
+
+    static func pixels(_ image: CGImage) throws -> [UInt8] {
+        let size = CGSize(width: image.width, height: image.height)
         var rgba = [UInt8](repeating: 0, count: image.width * image.height * 4)
         try rgba.withUnsafeMutableBytes { storage in
             guard let bitmap = CGContext(data: storage.baseAddress, width: image.width, height: image.height,
@@ -134,15 +139,45 @@ struct NativeChecks {
         var edit = Edit()
         edit.aperture = 1.4
         edit.focus = targets.0
-        let first = try await lab.export(edit, .normal)
+        let first = try await lab.export(edit, .maximum)
         defer { try? FileManager.default.removeItem(at: first.url) }
         edit.focus = targets.1
-        let other = try await lab.export(edit, .normal)
+        let other = try await lab.export(edit, .maximum)
         defer { try? FileManager.default.removeItem(at: other.url) }
         edit.film = .silver
-        _ = try await lab.preview(edit, .normal)
-        let silver = try await lab.export(edit, .normal)
+        _ = try await lab.preview(edit, .maximum)
+        let silver = try await lab.export(edit, .maximum)
         defer { try? FileManager.default.removeItem(at: silver.url) }
+        let depth = try await lab.preview(edit, .maximum, mapOnly: true)
+        guard depth.width == Int(size.width), depth.height == Int(size.height) else {
+            throw FocoError.message("Depth preview dimensions differ from the photograph")
+        }
+        let gray = try pixels(depth)
+        var mapMin = 255, mapMax = 0
+        for i in stride(from: 0, to: gray.count, by: 4) {
+            guard abs(Int(gray[i]) - Int(gray[i+2])) <= 1 else { throw FocoError.message("Depth preview is tinted") }
+            mapMin = min(mapMin, Int(gray[i])); mapMax = max(mapMax, Int(gray[i]))
+        }
+        guard mapMax - mapMin > 90 else { throw FocoError.message("Depth preview is flat") }
+        var looks: [Film: [UInt8]] = [:]
+        edit.texture = 0
+        for film in Film.allCases {
+            edit.film = film
+            let bitmap = try await lab.preview(edit, .maximum)
+            looks[film] = try pixels(bitmap)
+        }
+        for (index, film) in Film.allCases.enumerated() {
+            for other in Film.allCases.dropFirst(index + 1) {
+                let left = looks[film]!, right = looks[other]!
+                var total = 0
+                for i in stride(from: 0, to: left.count, by: 16) {
+                    for c in 0..<3 { total += abs(Int(left[i+c]) - Int(right[i+c])) }
+                }
+                let mean = Double(total) / (3 * ceil(Double(left.count) / 16))
+                print("Film pair", film.rawValue, other.rawValue, "mean channel delta", mean)
+                guard mean > 2.0 else { throw FocoError.message("Film curves too similar") }
+            }
+        }
         let a = try decodedRGB(first.url, size: size), b = try decodedRGB(other.url, size: size)
         let mono = try decodedRGB(silver.url, size: size)
         var different = 0, chromatic = 0, peakMonoChroma = 0
@@ -178,7 +213,7 @@ struct NativeChecks {
             guard let resource = Bundle.main.url(forResource: "DepthBase", withExtension: "mlmodelc")
             else { throw error }
             for unit in [MLComputeUnits.cpuOnly, .cpuAndGPU, .all] {
-                for function in [nil, "res_854x480"] as [String?] {
+                for function in [nil, "res_1280x720"] as [String?] {
                     let config = MLModelConfiguration()
                     config.computeUnits = unit
                     config.functionName = function
@@ -195,7 +230,7 @@ struct NativeChecks {
         }
         guard map.image.extent == scene.extent, map.low.isFinite, map.high.isFinite, map.high > map.low
         else { throw FocoError.message("Invalid dimensions or disparity range from Core ML") }
-        print("Core ML Base 854x480: prediction succeeded, registered to 511x683, range \(map.low)...\(map.high)")
+        print("Core ML Base 1280x720: prediction succeeded, registered to 511x683, range \(map.low)...\(map.high)")
         try await verifyEditor(scene, targets: focusTargets(map.image, context: context), context: context)
     }
 }

@@ -13,13 +13,13 @@ enum FocoError: LocalizedError {
 }
 
 enum DepthSize: String, CaseIterable, Identifiable {
-    case compact = "640x360", normal = "854x480", fine = "1138x640"
+    case compact = "640x360", normal = "854x480", fine = "1138x640", maximum = "1280x720"
     var id: Self {
         self
     }
 
     var title: String {
-        switch self { case .compact: return "Econômico"; case .normal: return "Normal"; case .fine: return "Detalhado" }
+        switch self { case .compact: return "Econômico"; case .normal: return "Normal"; case .fine: return "Detalhado"; case .maximum: return "M�ximo" }
     }
 }
 
