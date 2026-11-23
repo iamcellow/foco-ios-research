@@ -1,18 +1,27 @@
 name: Build de pesquisa iOS
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Rotina de pesquisa
+        type: choice
+        default: iphone
+        options:
+          - iphone
+          - verificar
 permissions:
   contents: read
 jobs:
   iphone:
-    if: github.event.repository.private == false
-    runs-on: macos-15
+    if: github.event.repository.private == false && inputs.task != 'verificar'
+    runs-on: xcode-27
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Selecionar Xcode e conferir Metal
+      - name: Conferir Xcode e Metal
         run: |
-          if [ -d /Applications/Xcode_16.4.app ]; then sudo xcode-select -s /Applications/Xcode_16.4.app; fi
           xcodebuild -version
+          if ! xcrun --sdk iphoneos metal --version; then xcodebuild -downloadComponent MetalToolchain; fi
           xcrun --sdk iphoneos metal --version
       - name: Compilar o IPA
         run: bash scripts/build.sh
@@ -28,4 +37,15 @@ jobs:
           name: Foco-cifrado
           path: build/Foco.ipa.cms
           retention-days: 1
+  verificar:
+    if: github.event.repository.private == false && inputs.task == 'verificar'
+    runs-on: xcode-27
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Testar JPEG e inferência Core ML
+        run: |
+          sw_vers
+          xcodebuild -version
+          bash scripts/verify-native.sh
 
