@@ -1,10 +1,19 @@
 name: Build de pesquisa iOS
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Rotina de pesquisa
+        type: choice
+        default: iphone
+        options:
+          - iphone
+          - verificar
 permissions:
   contents: read
 jobs:
   iphone:
-    if: github.event.repository.private == false
+    if: github.event.repository.private == false && inputs.task != 'verificar'
     runs-on: macos-15
     timeout-minutes: 25
     steps:
@@ -28,4 +37,14 @@ jobs:
           name: Foco-cifrado
           path: build/Foco.ipa.cms
           retention-days: 1
+  verificar:
+    if: github.event.repository.private == false && inputs.task == 'verificar'
+    runs-on: macos-15
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Testar JPEG e inferência Core ML
+        run: |
+          if [ -d /Applications/Xcode_16.4.app ]; then sudo xcode-select -s /Applications/Xcode_16.4.app; fi
+          bash scripts/verify-native.sh
 
